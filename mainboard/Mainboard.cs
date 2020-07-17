@@ -6,6 +6,11 @@ using System.Threading.Tasks;
 using System.Threading;
 using System.IO.Ports;
 using System.Messaging;
+using System.Runtime.CompilerServices;
+using System.Configuration;
+using XZE.STM32ISP;
+using System.IO;
+
 namespace Xze.TestBench
 {
     public class Mainboard : IDisposable
@@ -57,6 +62,7 @@ namespace Xze.TestBench
             XSW2,
             YSW0,
             YSW1,
+            YSW2,
             ZSW0,
             ZSW1,
             ZSW2,
@@ -95,6 +101,40 @@ namespace Xze.TestBench
             JS2D2Touch,
             JS2D3Touch,
             RXCollid,
+            MOTO_EMER,
+
+            /// <summary>
+            /// X轴电机运行完成
+            /// </summary>
+            MOTO_COMP_X,
+            /// <summary>
+            /// X轴电机运行超时
+            /// </summary>
+            MOTO_OT_X,
+            /// <summary>
+            /// X轴电机复位
+            /// </summary>
+            MOTO_RESET_X,
+            /// <summary>
+            /// X轴电机运行到远点
+            /// </summary>
+            MOTO_FAR_X,
+            MOTO_NEAR_X,
+            MOTO_EMER_X,
+
+            MOTO_COMP_Y,
+            MOTO_OT_Y,
+            MOTO_RESET_Y,
+            MOTO_FAR_Y,
+            MOTO_NEAR_Y,
+            MOTO_EMER_Y,
+
+            MOTO_COMP_Z,
+            MOTO_OT_Z,
+            MOTO_RESET_Z,
+            MOTO_FAR_Z,
+            MOTO_NEAR_Z,
+            MOTO_EMER_Z,
             NotifyEnd
         }
 
@@ -108,15 +148,16 @@ namespace Xze.TestBench
             }
         }
         /// <summary>
-        /// 字符串信息收到事件
+        /// 字符串信息被收到事件
         /// </summary>
         public event EventHandler<string> StringInfoReceived;
         /// <summary>
-        /// 通知信息收到事件
+        /// 上位机收到下位机的通知触发事件
         /// </summary>
         public event EventHandler<NotifyEventArgs> NotifyReceived;
 
         private SerialPort _sp;
+        private SerialPort _ispcom;
         private object _splock = new object();
         /// <summary>
         /// 串口资源互斥开关
@@ -126,10 +167,6 @@ namespace Xze.TestBench
         /// 寄存器读写响应消息接收事件触发
         /// </summary>
         private AutoResetEvent _recvevent;
-        /// <summary>
-        /// 下位机通知消息接收事件触发
-        /// </summary>
-        private AutoResetEvent _notifyevent;
         /// <summary>
         /// 串口数据接收事件触发
         /// </summary>
@@ -206,8 +243,9 @@ namespace Xze.TestBench
                     _sp.Write(buf, 0, buf.Length);
                     if (0xffff == recv_proc(CMD_MOTO_MOVE))
                         rs = false;
+                    _spmutex.ReleaseMutex();
                 }
-                _spmutex.ReleaseMutex();
+
             }).ConfigureAwait(false);
             return rs;
         }
@@ -215,6 +253,7 @@ namespace Xze.TestBench
         /// 复位指定轴向电机位置
         /// </summary>
         /// <param name="axis">需要复位的轴向</param>
+        /// <param name="timeout">超时，10ms单位</param>
         /// <returns></returns>
         public async Task<bool> MotoReset(Axis axis, UInt16 timeout)
         {
@@ -243,8 +282,9 @@ namespace Xze.TestBench
                     _sp.Write(buf, 0, buf.Length);
                     if (0xffff == recv_proc(CMD_MOTO_RST))
                         rs = false;
+                    _spmutex.ReleaseMutex();
                 }
-                _spmutex.ReleaseMutex();
+
             }).ConfigureAwait(false);
             return rs;
         }
@@ -256,7 +296,7 @@ namespace Xze.TestBench
         private UInt16 recv_proc(object obj)
         {
             UInt16 cmd = Convert.ToUInt16(obj);
-            if (_recvevent.WaitOne(1000))
+            if (_recvevent.WaitOne(100))
             {
                 //如果是读命令的响应，返回数据,写命令则返回非0xffff的值
                 if ((cmd & 0xff00) == 0x0200)
@@ -305,24 +345,30 @@ namespace Xze.TestBench
         /// 读输入寄存器状态
         /// </summary>
         /// <param name="reg">寄存器名称</param>
-        /// <returns>返回输入状态 '0'或‘非0’</returns>
-        public async Task<UInt16> ReadReg(ReadableRegs reg)
+        /// <returns>返回输入状态 '0'或‘非0’,0xffff表示访问错误</returns>
+        private async Task<UInt16> ReadReg(ReadableRegs reg)
         {
             UInt16 val = 0;
             byte[] ar = generate_read_command((UInt16)reg);
             await Task.Run(() =>
             {
+                bool wait;
                 //串口资源互斥锁
-                if (!_spmutex.WaitOne())
+                //Console.WriteLine($"Before wait, thread id is {Thread.CurrentThread.ManagedThreadId}");
+                wait = _spmutex.WaitOne(50);
+                if (!wait)
                 {
                     val = 0xffff;
                 }
                 else
                 {
+                    //Console.WriteLine($"Fetch wait, thread id is {Thread.CurrentThread.ManagedThreadId}");
                     _sp.Write(ar, 0, ar.Length);
                     val = recv_proc((UInt16)reg);
+                    _spmutex.ReleaseMutex();
                 }
-                _spmutex.ReleaseMutex();
+                //Console.WriteLine($"after wait, thread id is {Thread.CurrentThread.ManagedThreadId}");
+
             }).ConfigureAwait(false);
             return val;
         }
@@ -347,17 +393,16 @@ namespace Xze.TestBench
         /// </summary>
         /// <param name="wr">输出寄存器名称</param>
         /// <param name="val">输出状态，‘0’或‘非0’</param>
-        /// <returns></returns>
-        public async Task<bool> WriteReg(WritableRegs wr, UInt16 val)
+        /// <returns>返回下位机的响应状态，true成功，false失败</returns>
+        private async Task<bool> WriteReg(WritableRegs wr, UInt16 val)
         {
             bool rs = true; ;
             if (val != 0)
                 val = 1;
             byte[] ar = generate_write_command((UInt16)wr, val);
-            Console.WriteLine($"Beging Task.Run,thread id{Thread.CurrentThread.ManagedThreadId}");
             await Task.Run(() =>
            {
-               if (!_spmutex.WaitOne())
+               if (!_spmutex.WaitOne(10))
                {
                    rs = false;
                }
@@ -368,9 +413,14 @@ namespace Xze.TestBench
                        rs = true;
                    else
                        rs = false;
+                   _spmutex.ReleaseMutex();
                }
-               _spmutex.ReleaseMutex();
+
            }).ConfigureAwait(false);
+            if (rs)
+                Console.WriteLine($"Register {wr} write {val} succ");
+            else
+                Console.WriteLine($"Register {wr} write {val} fail");
             return rs;
         }
 
@@ -378,14 +428,20 @@ namespace Xze.TestBench
         {
             UInt16 val = 0;
             byte[] ar = generate_read_command(0xff00);
-            //串口资源互斥锁
-            _spmutex.WaitOne();
-            _sp.Write(ar, 0, ar.Length);
-            Task<UInt16> task = new Task<ushort>(new Func<object, ushort>(recv_proc), 0xff00);
-            task.Start();
-            /*运行到此处,任务被挂起，等待接收数据响应，由于互斥锁的存在，*/
-            val = await task;
-            _spmutex.ReleaseMutex();
+            await Task.Run(() =>
+            {
+                //串口资源互斥锁
+                if (!_spmutex.WaitOne(500))
+                {
+                    val = 0xffff;
+                }
+                else
+                {
+                    _sp.Write(ar, 0, ar.Length);
+                    val = recv_proc(0xff00);
+                    _spmutex.ReleaseMutex();
+                }
+            }).ConfigureAwait(false);
             if (val == 0xffff)
                 return false;
             return true;
@@ -400,7 +456,7 @@ namespace Xze.TestBench
             {
                 _datarecvevent.WaitOne();
                 if (!_keepthread)
-                    return;
+                    break;
                 while (_sp.BytesToRead > 0)
                 {
                     chk = 0;
@@ -437,8 +493,8 @@ namespace Xze.TestBench
                             //写操作的应答，以及读操作的返回
                             _recvevent.Set();
                             //读操作应答
-                            if (buf[2] == 0x02)
-                                _regdata = (UInt16)(buf[3] * 256 + buf[4]);
+                            if (buf[0] == 0x02)
+                                _regdata = (UInt16)(buf[2] * 256 + buf[3]);
 
                         }
                         if (buf[0] == 0x04)
@@ -473,11 +529,326 @@ namespace Xze.TestBench
                     }
                 }
             }
+            Console.WriteLine("receive thread exit");
+        }
+        public async Task<bool> Fan1On()
+        {
+            return await WriteReg(WritableRegs.Fan1, 0).ConfigureAwait(false);
+        }
+        public async Task<bool> Fan1Off()
+        {
+            return await WriteReg(WritableRegs.Fan1, 1).ConfigureAwait(false);
+        }
+        public async Task<bool> Fan2On()
+        {
+            return await WriteReg(WritableRegs.Fan2, 0).ConfigureAwait(false);
+        }
+        public async Task<bool> Fan2Off()
+        {
+            return await WriteReg(WritableRegs.Fan2, 1).ConfigureAwait(false); ;
+        }
 
+        public async Task<bool> VoutOn()
+        {
+            return await WriteReg(WritableRegs.SW24V, 0).ConfigureAwait(false);
+        }
+        public async Task<bool> VoutOff()
+        {
+            return await WriteReg(WritableRegs.SW24V, 1).ConfigureAwait(false);
+        }
+        public async Task<bool> VccOn()
+        {
+            return await WriteReg(WritableRegs.SW5V, 0).ConfigureAwait(false);
+        }
+        public async Task<bool> VccOff()
+        {
+            return await WriteReg(WritableRegs.SW5V, 1).ConfigureAwait(false);
+        }
+        public async Task<bool> BuzzerOn()
+        {
+            return await WriteReg(WritableRegs.Buzer, 0).ConfigureAwait(false);
+        }
+        public async Task<bool> BuzzerOff()
+        {
+            return await WriteReg(WritableRegs.Buzer, 1).ConfigureAwait(false);
+        }
+        public async Task<bool> LaserOn()
+        {
+            return await WriteReg(WritableRegs.Laser, 0).ConfigureAwait(false);
+        }
+        public async Task<bool> LaserOff()
+        {
+            return await WriteReg(WritableRegs.Laser, 1).ConfigureAwait(false);
+        }
+        public async Task<bool> LampOn()
+        {
+            return await WriteReg(WritableRegs.Lamp, 0).ConfigureAwait(false);
+        }
+        public async Task<bool> LampOff()
+        {
+            return await WriteReg(WritableRegs.Lamp, 1).ConfigureAwait(false);
+        }
+        public async Task<bool> LedOn()
+        {
+            return await WriteReg(WritableRegs.LED, 0).ConfigureAwait(false);
+        }
+        public async Task<bool> LedOff()
+        {
+            return await WriteReg(WritableRegs.LED, 1).ConfigureAwait(false);
+        }
+        public async Task<bool> HighPowerPort1On()
+        {
+            return await WriteReg(WritableRegs.HpOut1, 0).ConfigureAwait(false);
+        }
+        public async Task<bool> HighPowerPort1Off()
+        {
+            return await WriteReg(WritableRegs.HpOut1, 1).ConfigureAwait(false);
+        }
+
+        public async Task<bool> HighPowerPort2On()
+        {
+            return await WriteReg(WritableRegs.HpOut2, 0).ConfigureAwait(false);
+        }
+
+        public async Task<bool> HighPowerPort2Off()
+        {
+            return await WriteReg(WritableRegs.HpOut2, 1).ConfigureAwait(false);
+        }
+        /// <summary>
+        /// 获取X轴零点的状态
+        /// </summary>
+        /// <remarks>建议使用<seealso cref="x = await fun() "/>形式作异步调用</remarks>
+        /// <returns>0:开关无遮挡;1:开关有遮挡;0xffff:读取失败</returns>
+        public async Task<UInt16> GetXZeroVal()
+        {
+            return await ReadReg(ReadableRegs.XSW0).ConfigureAwait(false);
+        }
+        /// <summary>
+        /// 获取X轴近点的状态
+        /// </summary>
+        /// <remarks>建议使用<seealso cref="x = await fun() "/>形式作异步调用</remarks>
+        /// <returns>0:开关无遮挡;1:开关有遮挡;0xffff:读取失败</returns>
+        public async Task<UInt16> GetXNearVal()
+        {
+            return await ReadReg(ReadableRegs.XSW1).ConfigureAwait(false);
+        }
+        /// <summary>
+        /// 获取X轴远点的状态
+        /// </summary>
+        /// <remarks>建议使用<seealso cref="x = await fun() "/>形式作异步调用</remarks>
+        /// <returns>0:开关无遮挡;1:开关有遮挡;0xffff:读取失败</returns>
+        public async Task<UInt16> GetXFarVal()
+        {
+            return await ReadReg(ReadableRegs.XSW2).ConfigureAwait(false);
+        }
+        /// <summary>
+        /// 获取Y轴零点的状态
+        /// </summary>
+        /// <remarks>建议使用<seealso cref="x = await fun() "/>形式作异步调用</remarks>
+        /// <returns>0:开关无遮挡;1:开关有遮挡;0xffff:读取失败</returns>
+        public async Task<UInt16> GetYZeroVal()
+        {
+            return await ReadReg(ReadableRegs.YSW0).ConfigureAwait(false);
+        }
+        /// <summary>
+        /// 获取Y轴近点的状态
+        /// </summary>
+        /// <remarks>建议使用<seealso cref="x = await fun() "/>形式作异步调用</remarks>
+        /// <returns>0:开关无遮挡;1:开关有遮挡;0xffff:读取失败</returns>
+        public async Task<UInt16> GetYNearVal()
+        {
+            return await ReadReg(ReadableRegs.YSW1).ConfigureAwait(false);
+        }
+        /// <summary>
+        /// 获取Y轴远点的状态
+        /// </summary>
+        /// <remarks>建议使用<seealso cref="x = await fun() "/>形式作异步调用</remarks>
+        /// <returns>0:开关无遮挡;1:开关有遮挡;0xffff:读取失败</returns>
+        public async Task<UInt16> GetYFarVal()
+        {
+            return await ReadReg(ReadableRegs.YSW2).ConfigureAwait(false);
+        }
+        /// <summary>
+        /// 获取Z轴零点的状态
+        /// </summary>
+        /// <remarks>建议使用<seealso cref="x = await fun() "/>形式作异步调用</remarks>
+        /// <returns>0:开关无遮挡;1:开关有遮挡;0xffff:读取失败</returns>
+        public async Task<UInt16> GetZZeroVal()
+        {
+            return await ReadReg(ReadableRegs.ZSW0).ConfigureAwait(false);
+        }
+        /// <summary>
+        /// 获取Z轴近点的状态
+        /// </summary>
+        /// <remarks>建议使用<seealso cref="x = await fun() "/>形式作异步调用</remarks>
+        /// <returns>0:开关无遮挡;1:开关有遮挡;0xffff:读取失败</returns>
+        public async Task<UInt16> GetZNearVal()
+        {
+            return await ReadReg(ReadableRegs.ZSW1).ConfigureAwait(false);
+        }
+        /// <summary>
+        /// 获取Z轴远点的状态
+        /// </summary>
+        /// <remarks>建议使用<seealso cref="x = await fun() "/>形式作异步调用</remarks>
+        /// <returns>0:开关无遮挡;1:开关有遮挡;0xffff:读取失败</returns>
+        public async Task<UInt16> GetZFarVal()
+        {
+            return await ReadReg(ReadableRegs.ZSW2).ConfigureAwait(false);
+        }
+        /// <summary>
+        /// Mainboard类的静态工具方法,查找连接到的设备，
+        /// </summary>
+        /// <returns>返回当前设备的句柄，没找到设备则返回<see cref="null"/></returns>
+        public static Mainboard FindDevice()
+        {
+            Mainboard mb = null;
+            string[] names = SerialPort.GetPortNames();
+            foreach (string s in names)
+            {
+                try
+                {
+                    mb = new Mainboard(new SerialPort(s));
+                    Console.WriteLine(DateTime.Now.ToLongTimeString());
+                    if (mb.LedOff().Result)
+                    {
+                        Console.WriteLine($"Device is finded at port {mb._sp.PortName}");
+                        break;
+                    }
+                    else
+                    {
+                        mb._sp.Close();
+                        mb.Dispose();
+                        mb = null;
+                    }
+                    Console.WriteLine(DateTime.Now.ToLongTimeString());
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine(ex.Message);
+                    mb = null;
+                }
+                finally
+                {
+
+                }
+            }
+            return mb;
+        }
+
+        public bool UpdateFirmware(FileStream fw)
+        {
+            bool rs = true;
+            string name = _sp.PortName;
+            STMisp stmisp = new STMisp();
+            stmisp.Write = isp_write;
+            stmisp.Read = isp_read;
+            ResetToISP().Wait();
+
+            // 退出接收线程
+            _keepthread = false;
+            _datarecvevent.Set();
+            _sp.Close();
+            Thread.Sleep(100);
+            _ispcom = new SerialPort(name ,115200, Parity.Even, 8, StopBits.One);
+            _ispcom.ReadTimeout = 200;
+            _ispcom.Open();
+            ISPACK ack;
+            ack = stmisp.InitBL();
+            if (ack != ISPACK.ISP_ACK)
+                rs = false;
+#if true
+            ack = stmisp.Erase();
+            if (ack == ISPACK.ISP_TO)
+                rs = false;
+            if (ack == ISPACK.ISP_NACK)
+            {
+                ack = stmisp.Read_unprotect();
+                if (ack != ISPACK.ISP_ACK)
+                    rs = false;
+                Thread.Sleep(50);
+                if (stmisp.InitBL() == ISPACK.ISP_TO)
+                    rs = false;
+            }
+            if (rs)
+            {
+                long len_rem = fw.Length;
+                uint start_addr = 0x08000000;
+                byte[] wm = new byte[256];
+
+                while (len_rem >= 256)
+                {
+                    fw.Read(wm, 0, 256);
+                    if (WriteMemoryResult.OK != stmisp.WriteMemory(start_addr, 256, wm))
+                    {
+                        rs = false;
+                        break;
+                    }
+                    len_rem -= 256;
+                    start_addr += 256;
+                    Console.WriteLine("remain bytes:{0}", len_rem);
+                    Thread.Sleep(50);
+                }
+                if (len_rem > 0 && rs == true)
+                {
+                    fw.Read(wm, 0, (int)len_rem);
+                    if (WriteMemoryResult.OK != stmisp.WriteMemory(start_addr, 256, wm))
+                    {
+                        rs = false;
+                    }
+                    Thread.Sleep(30);
+                }
+                fw.Close();
+            }
+#endif
+            if (rs)
+            {
+                if (stmisp.Go() != ISPACK.ISP_ACK)
+                {
+                    Console.WriteLine("go fail");
+                }
+                else
+                    Console.WriteLine("go succ");
+            }
+            _ispcom.Close();
+            _sp.Open();
+            _sp.DiscardInBuffer();
+            _keepthread = true;
+            Thread _t = new Thread(new ThreadStart(recv_thread));
+            _t.Start();
+            return rs;
         }
 
 
-        #region IDisposable Support
+
+        private bool isp_write(byte[] buff, int count)
+        {
+            _ispcom.DiscardOutBuffer();
+            _ispcom.Write(buff, 0, count);
+            return true;
+        }
+
+        private bool isp_read(byte[] buff, int count)
+        {
+            int cnt;
+            try
+            {
+                cnt = _ispcom.Read(buff, 0, count);
+            }
+            catch
+            {
+                cnt = 0;
+            }
+            if (cnt > 0)
+            {
+                return true;
+            }
+            else
+            {
+                Console.WriteLine("串口连接故障");
+            }
+            return false;
+        }
+#region IDisposable Support
         private bool disposedValue = false; // 要检测冗余调用
 
         protected virtual void Dispose(bool disposing)
@@ -512,7 +883,7 @@ namespace Xze.TestBench
             // TODO: 如果在以上内容中替代了终结器，则取消注释以下行。
             // GC.SuppressFinalize(this);
         }
-        #endregion
+#endregion
     }
 }
 

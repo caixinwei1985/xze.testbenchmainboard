@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.ComponentModel;
 using System.Data;
 using System.Drawing;
+using System.IO;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
@@ -13,6 +14,7 @@ namespace WindowsFormsApp1
     public partial class Form1 : Form
     {
         Mainboard _mainboard;
+        Timer _timer;
         public Form1()
         {
             InitializeComponent();
@@ -20,62 +22,67 @@ namespace WindowsFormsApp1
 
         private void Form1_Load(object sender, EventArgs e)
         {
-            System.IO.Ports.SerialPort sp = new System.IO.Ports.SerialPort("COM14");
-            _mainboard = new Mainboard(sp);
-            _mainboard.StringInfoReceived += _mainboard_StringInfoReceived;
-            _mainboard.NotifyReceived += _mainboard_NotifyReceived;
+            //System.IO.Ports.SerialPort sp = new System.IO.Ports.SerialPort("COM8");
+            //_mainboard = new Mainboard(sp);
+            comboBox1.DataSource = Enum.GetValues(typeof(Mainboard.Axis));
+            comboBox1.SelectedIndex = 0;
+            _mainboard = Mainboard.FindDevice();
+            if (_mainboard != null)
+            {
+                _mainboard.StringInfoReceived += _mainboard_StringInfoReceived;
+                _mainboard.NotifyReceived += _mainboard_NotifyReceived;
+                _timer = new Timer();
+                _timer.Interval = 200;
+                _timer.Tick += _timer_Tick;
+                _timer.Start();
+            }
+        }
 
+        private async void timer_tick_calling()
+        {
+            UInt16 rs = await _mainboard.GetXZeroVal();
+            if (rs == 0)
+                chkXSW0.Checked = true;
+            else if (rs == 1)
+                chkXSW0.Checked = false;
+            rs = await _mainboard.GetXNearVal();
+            if (rs == 0)
+                chkXSW1.Checked = true;
+            else
+                chkXSW1.Checked = false;
+            rs = await _mainboard.GetXFarVal();
+            if (rs == 0)
+                chkXSW2.Checked = true;
+            else
+                chkXSW2.Checked = false;
+
+            rs = await _mainboard.GetYZeroVal();
+            if (rs == 0)
+                chkYSW0.Checked = true;
+            else
+                chkYSW0.Checked = false;
+
+            rs = await _mainboard.GetYNearVal();
+            if (rs == 0) 
+                chkYSW1.Checked = true;
+            else 
+                chkYSW1.Checked = false;
+
+            rs = await _mainboard.GetYFarVal();
+            if (rs == 0)
+                chkYSW2.Checked = true;
+            else
+                chkYSW2.Checked = false;
+        }
+        private void _timer_Tick(object sender, EventArgs e)
+        {
+            timer_tick_calling();
         }
 
         private void _mainboard_NotifyReceived(object sender, Mainboard.NotifyEventArgs e)
         {
-            switch (e.Notify)
-            {
-                case Mainboard.Notify.MotoComplete:
-                    Console.Write("moto move completely");
-                    break;
-                case Mainboard.Notify.MotoTimeout:
-                    Console.Write("moto move timeout");
-                    break;
-                case Mainboard.Notify.ProtectionTrigger:
-                    break;
-                case Mainboard.Notify.MotoReset:
-                    break;
-                case Mainboard.Notify.MotoFarTrigger:
-                    break;
-                case Mainboard.Notify.MotoNearTrigger:
-                    break;
-                case Mainboard.Notify.StartBtnPress:
-                    Console.WriteLine("Start button press");
-                    break;
-                case Mainboard.Notify.JS1BtnPress:
-                    break;
-                case Mainboard.Notify.JS1D0Touch:
-                    break;
-                case Mainboard.Notify.JS1D1Touch:
-                    break;
-                case Mainboard.Notify.JS1D2Touch:
-                    break;
-                case Mainboard.Notify.JS1D3Touch:
-                    break;
-                case Mainboard.Notify.JS2BtnPress:
-                    break;
-                case Mainboard.Notify.JS2D0Touch:
-                    break;
-                case Mainboard.Notify.JS2D1Touch:
-                    break;
-                case Mainboard.Notify.JS2D2Touch:
-                    break;
-                case Mainboard.Notify.JS2D3Touch:
-                    break;
-                case Mainboard.Notify.RXCollid:
-                    Console.WriteLine("Rx Collid");
-                    break;
-                case Mainboard.Notify.NotifyEnd:
-                    break;
-                default:
-                    break;
-            }
+            Console.WriteLine(e.Notify.ToString());
+
         }
 
         private void _mainboard_StringInfoReceived(object sender, string e)
@@ -88,64 +95,177 @@ namespace WindowsFormsApp1
 
         }
 
-        private  void btSend_Click(object sender, EventArgs e)
-        {
-           
-
-            //if ( await _mainboard.WrtieReg(Mainboard.WritableRegs.XDir, val))
-            //    Console.WriteLine("xdir wroten succ");
-            //else
-            //    Console.WriteLine("xdir wrtoen fail");
-            //if (_mainboard.WrtieReg(Mainboard.WritableRegs.MotoEn, val).Result)
-            //    Console.WriteLine("Motoen wroten");
-            //else
-            //    Console.WriteLine("Motoen wroten fail");
-            CallingAsync();
-            Console.WriteLine("Calling complete");
-        }
-        private async void CallingAsync()
-        {
-            UInt16 val;
-
-            if (chkSet.Checked)
-                val = 1;
-            else
-                val = 0;
-            Console.WriteLine("begin calling");
-            Task<bool> t1 = _mainboard.WriteReg(Mainboard.WritableRegs.XDir, val);
-            Task<bool> t2 = _mainboard.WriteReg(Mainboard.WritableRegs.MotoEn, val);
-
-            Console.WriteLine("end calling");
-            bool rs1 = await t1;
-            bool rs2 = await t2;
-            Console.WriteLine($"t1 result = {rs1}");
-            Console.WriteLine($"t2 result = {rs2}");
-        }
         private async void button1_Click(object sender, EventArgs e)
         {
-            if (await _mainboard.MotoMove(Mainboard.Axis.Y, 200, 60000, 600000, 6000))
+            Mainboard.Axis axis = (Mainboard.Axis)comboBox1.SelectedItem;
+            int steps =(int) nudSteps.Value;
+            int speed = (int)nudSpeed.Value;
+            int acc = (int)nudAcc.Value;
+            if (chkNeg.Checked)
+                steps = 0 - steps;
+            if (await _mainboard.MotoMove(axis,(byte)acc,(ushort)speed,steps, 6000))
                 Console.WriteLine("Moto move succ");
         }
 
         private void Form1_FormClosing(object sender, FormClosingEventArgs e)
         {
-            _mainboard.Dispose();
+
+            _mainboard?.Dispose();
         }
 
-        private async void methodasync()
-        {
-            if (true == await _mainboard.WriteReg(Mainboard.WritableRegs.SW5V, 1))
-                Console.WriteLine("5v ctrl");
-        }
+        UInt16 valsw = 0;
         private void button2_Click(object sender, EventArgs e)
         {
-            methodasync();
-            Console.WriteLine("calling  finish");
-        }
 
+            if (valsw == 0)
+                _mainboard.Fan2On();
+            else
+                _mainboard.Fan2Off();
+            valsw = (UInt16)(valsw ^ 1);
+        }
+        private double acceleratingtime(int acc, int alignment, int startspeed, int targetspeed)
+        {
+            double time = 0.0;
+            double currspeed = startspeed;
+            int steps = (targetspeed - startspeed) / acc;
+            Console.WriteLine($"accelerating steps = {steps} ");
+            double t = 0;
+            while (steps > 0)
+            {
+                if (steps >= alignment)
+                {
+                    t = 1 / currspeed * alignment;
+                    currspeed += acc * alignment;
+                    steps -= alignment;
+                }
+                else if (steps > 0)
+                {
+                    t = 1 / currspeed;
+                    currspeed += acc;
+                    steps--;
+                }
+                time += t;
+                Console.WriteLine($"Spend time:{t},Remaind steps:{steps}");
+            }
+            return time;
+        }
         private void button3_Click(object sender, EventArgs e)
         {
-            _mainboard.ResetToISP();
+            if (valsw > 0)
+                _mainboard.HighPowerPort2Off();
+            else
+                _mainboard.HighPowerPort2On();
+            valsw = (UInt16)(valsw ^ 1);
+        }
+
+        private void btFan1_Click(object sender, EventArgs e)
+        {
+            if (valsw > 0)
+                _mainboard.Fan1Off();
+            else
+                _mainboard.Fan1On();
+            valsw = (UInt16)(valsw ^ 1);
+        }
+
+        private void btVout_Click(object sender, EventArgs e)
+        {
+            if (valsw > 0)
+            { _mainboard.VoutOff(); }
+            else
+            {
+                _mainboard.VoutOn();
+            }
+            valsw = (UInt16)(valsw ^ 1);
+        }
+
+        private void btVcc_Click(object sender, EventArgs e)
+        {
+            if (valsw > 0)
+                _mainboard.VccOff();
+            else
+                _mainboard.VccOn();
+            valsw = (UInt16)(valsw ^ 1);
+        }
+
+        private void btLed_Click(object sender, EventArgs e)
+        {
+            if (valsw > 0)
+                _mainboard.LedOff();
+            else
+                _mainboard.LedOn();
+            valsw = (UInt16)(valsw ^ 1);
+        }
+
+        private void btBuzzer_Click(object sender, EventArgs e)
+        {
+            if (valsw > 0)
+                _mainboard.BuzzerOff();
+            else
+                _mainboard.BuzzerOn();
+            valsw = (UInt16)(valsw ^ 1);
+        }
+
+        private void btLamp_Click(object sender, EventArgs e)
+        {
+            if (valsw > 0)
+                _mainboard.LampOff();
+            else
+                _mainboard.LampOn();
+            valsw = (UInt16)(valsw ^ 1);
+        }
+
+        private void btLaser_Click(object sender, EventArgs e)
+        {
+            if (valsw > 0)
+                _mainboard.LaserOff();
+            else
+                _mainboard.LaserOn();
+            valsw = (UInt16)(valsw ^ 1);
+        }
+
+        private void btHPO1_Click(object sender, EventArgs e)
+        {
+            if (valsw > 0)
+                _mainboard.HighPowerPort1Off();
+            else
+                _mainboard.HighPowerPort1On();
+            valsw = (UInt16)(valsw ^ 1);
+        }
+
+        private async void button2_Click_1(object sender, EventArgs e)
+        {
+            if (await _mainboard.MotoReset((Mainboard.Axis) comboBox1.SelectedItem, 20000))
+                Console.WriteLine("Reset send succ");
+        }
+
+        private void button4_Click(object sender, EventArgs e)
+        {
+            Console.WriteLine($"total time = {acceleratingtime(8, 16, 1000, 60000)}");
+        }
+
+        private void button5_Click(object sender, EventArgs e)
+        {
+            timer_tick_calling();
+        }
+
+        private void comboBox1_SelectedIndexChanged(object sender, EventArgs e)
+        {
+
+        }
+
+        private void btISP_Click(object sender, EventArgs e)
+        {
+            OpenFileDialog ofd = new OpenFileDialog();
+            ofd.Filter ="BIN File| *.bin";
+            if (ofd.ShowDialog() == DialogResult.OK)
+            {
+                FileStream fs = new FileStream(ofd.FileName, FileMode.Open);
+                if (_mainboard.UpdateFirmware(fs))
+                    MessageBox.Show("Update succeed");
+                else
+                    MessageBox.Show("Update failed");
+            }
+
         }
     }
 }
